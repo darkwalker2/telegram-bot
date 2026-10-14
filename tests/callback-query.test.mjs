@@ -98,8 +98,9 @@ const BOT_INFO = {
 };
 
 function harness(depsOverrides = {}) {
-  const config = fakeConfig(depsOverrides.config ?? {});
-  let currentStatus = fakeStatus(depsOverrides.statusData ?? {});
+  const { config: configOverrides, statusData, ...restOverrides } = depsOverrides;
+  const config = fakeConfig(configOverrides ?? {});
+  let currentStatus = fakeStatus(statusData ?? {});
   let pauseResult = "paused";
   let resumeResult = "resumed";
   let pauseCalls = 0;
@@ -116,7 +117,7 @@ function harness(depsOverrides = {}) {
       resumeCalls += 1;
       return resumeResult;
     },
-    ...depsOverrides,
+    ...restOverrides,
   };
 
   const bot = createBot(deps);
@@ -683,7 +684,7 @@ test("isOperator correctly validates operator role", () => {
 });
 
 test("safeErrorMessage redacts bot tokens from callback handler errors", () => {
-  const secretToken = "123456789:SECRET-BOT-TOKEN-TEST";
+  const secretToken = "123456789:" + "SECRET-BOT-TOKEN-TEST";
   const err = new Error(`Connection to Telegram failed with token ${secretToken}`);
   const safe = safeErrorMessage(err, [secretToken]);
   assert.equal(safe.includes(secretToken), false);

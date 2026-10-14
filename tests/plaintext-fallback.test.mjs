@@ -16,6 +16,9 @@ import { createPoller } from "../dist/poller.js";
 const VALID_TX = "0123456789abcdef".repeat(4);
 assert.equal(VALID_TX.length, 64);
 
+const POLLER_MARKET_ID = "C" + "A".repeat(55);
+const POLLER_SQUAD_ID = "C" + "B".repeat(55);
+
 function testnetConfig(overrides = {}) {
   return {
     marketContractId: "market",
@@ -281,7 +284,7 @@ test("poller falls back to plain text on parse errors and still advances the cur
     operationIndex: 0,
     inSuccessfulContractCall: true,
     txHash,
-    contractId: "market",
+    contractId: POLLER_MARKET_ID,
     topic: [xdr.ScVal.scvString("claim_cancelled"), nativeToScVal(7, { type: "u64" })],
     value: xdr.ScVal.scvVoid(),
   };
@@ -303,7 +306,12 @@ test("poller falls back to plain text on parse errors and still advances the cur
   };
   const notify = createNotifier(fakeBot, testnetConfig());
   const poller = createPoller({
-    config: { ...testnetConfig(), cursorFile, statusFile: path.join(dir, "status.json") },
+    // The poller validates contract ids before scanning: use real C… strkeys.
+    config: {
+      ...testnetConfig({ marketContractId: POLLER_MARKET_ID, squadContractId: POLLER_SQUAD_ID }),
+      cursorFile,
+      statusFile: path.join(dir, "status.json"),
+    },
     server,
     send: (text, source, extra) => notify(text, source, extra),
   });

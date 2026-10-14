@@ -9,7 +9,7 @@ import { createAuditLog } from "../dist/audit.js";
 
 const MARKET_ID = "C" + "A".repeat(55);
 const SQUAD_ID = "C" + "B".repeat(55);
-const CREATOR = "G" + "A".repeat(55);
+const CREATOR = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 7)).publicKey();
 
 function baseConfig(overrides = {}) {
   return {
@@ -106,7 +106,7 @@ test("batched-send: partial failure", async () => {
   bot.api.sendMessage = async (chatId, text, opts) => {
     attempts++;
     // Make the second message fail completely
-    if (text.includes("Claim 2")) {
+    if (text.includes("\#2")) {
       throw new GrammyError("Call to 'sendMessage' failed!", { ok: false, error_code: 400, description: "Bad Request" }, "sendMessage", {});
     }
   };

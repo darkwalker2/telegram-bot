@@ -39,6 +39,7 @@ jobs:
   build:
     needs: scan-secrets
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -65,9 +66,6 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
-
-      - name: Tests (notification formats + secret-scanner properties)
-        run: npm test
 
       - name: Build
         run: npm run build

@@ -59,7 +59,8 @@ export function boundText(value: string, max = MAX_ERROR_CHARS): string {
  * sign and last four digits; a `@username` keeps only the leading character.
  * Enough to tell two deployments apart, not enough to be a usable target.
  */
-export function redactChatId(chatId: string): string {
+export function redactChatId(chatId: string | undefined): string {
+  if (typeof chatId !== "string") return "…";
   if (chatId.startsWith("@")) {
     return chatId.length > 1 ? `@${chatId[1]}…` : "@…";
   }
@@ -141,7 +142,7 @@ export function buildStatusSnapshot(
     running: status.running,
     network: networkLabel(config),
     rpcUrl: config.rpcUrl,
-    chatId: redactChatId(config.chatId),
+    chatId: redactChatId(config.chatId ?? config.chatIds?.[0]),
     pollIntervalMs: config.pollIntervalMs,
     maxNotificationsPerCycle: config.maxNotificationsPerCycle,
     cycles: status.cycles,

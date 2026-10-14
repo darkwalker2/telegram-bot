@@ -31,12 +31,21 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const MOCK_RUN_CLI = fileURLToPath(new URL("../dist/mock-run.js", import.meta.url));
+
+// The children run in a throwaway cwd: the mock profile keeps its cursor and
+// instance lock under ./data, and other suites running in parallel must not
+// contend for (or inherit) the repository's copy.
+const CHILD_CWD = mkdtempSync(path.join(os.tmpdir(), "mimir-shutdown-"));
+test.after(() => rmSync(CHILD_CWD, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 
 const ENV_STRIP = [
   "MIMIR_PROFILE",
@@ -294,6 +303,7 @@ test("mock:poll exits with code 0 on SIGTERM", async () => {
     process.execPath,
     [MOCK_RUN_CLI, "--port", "0"],
     {
+      cwd: CHILD_CWD,
       env: childEnv({ HEALTH_PORT: "0" }),
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -327,6 +337,7 @@ test("mock:poll logs SIGTERM received and stopping before exit", async () => {
     process.execPath,
     [MOCK_RUN_CLI, "--port", "0"],
     {
+      cwd: CHILD_CWD,
       env: childEnv({ HEALTH_PORT: "0" }),
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -360,6 +371,7 @@ test("mock:poll exits with code 0 on SIGINT", async () => {
     process.execPath,
     [MOCK_RUN_CLI, "--port", "0"],
     {
+      cwd: CHILD_CWD,
       env: childEnv({ HEALTH_PORT: "0" }),
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -392,6 +404,7 @@ test("mock:poll logs SIGINT received and stopping before exit", async () => {
     process.execPath,
     [MOCK_RUN_CLI, "--port", "0"],
     {
+      cwd: CHILD_CWD,
       env: childEnv({ HEALTH_PORT: "0" }),
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -425,6 +438,7 @@ test("mock:poll does not exit non-zero on a clean SIGTERM (no error output)", as
     process.execPath,
     [MOCK_RUN_CLI, "--port", "0"],
     {
+      cwd: CHILD_CWD,
       env: childEnv({ HEALTH_PORT: "0" }),
       stdio: ["ignore", "pipe", "pipe"],
     },

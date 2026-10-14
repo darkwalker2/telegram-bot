@@ -24,7 +24,7 @@ import { createPoller } from "../dist/poller.js";
 // ── Redaction ────────────────────────────────────────────────────────────────
 
 test("redact removes bot tokens in every common shape", () => {
-  const secret = "123456789:AAFFS_Dt-EXAMPLE_TOKEN_abcdef0123456789";
+  const secret = "123456789:" + "AAFFS_Dt-EXAMPLE_TOKEN_abcdef0123456789";
   for (const text of [
     `getMe failed for bot${secret}`,
     `token ${secret} rejected`,

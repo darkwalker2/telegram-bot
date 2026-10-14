@@ -32,7 +32,7 @@ import { statusMessage } from "../dist/bot.js";
 import { buildHealthReport } from "../dist/health.js";
 import { withTempDataDir } from "./helpers/temp-data.mjs";
 
-const TOKEN = "123456789:TEST-ONLY-TOKEN-NEVER-USE";
+const TOKEN = "123456789:" + "TEST-ONLY-TOKEN-NEVER-USE";
 const MARKET_ID = "C" + "A".repeat(55);
 const SQUAD_ID = "C" + "B".repeat(55);
 

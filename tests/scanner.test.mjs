@@ -129,11 +129,18 @@ test("paginatedGetEvents (boundary): empty response retains cursor", async () =>
   assert.equal(result.cursor, "123-1");
 });
 
+// Scans validate the contract id first, so the fixture must be a real C… strkey.
+const CONTRACT_ID = "C" + "A".repeat(55);
+
 test("readContractEvents: parses events properly to UnknownPayload on mock", async () => {
   const server = createFakeServer({
-    events: [makeRawEvent(150, "CA")],
+    events: [makeRawEvent(150, CONTRACT_ID)],
   });
-  const result = await readContractEvents(server, { source: "market", contractId: "CA" });
+  const result = await readContractEvents(
+    server,
+    { source: "market", contractId: CONTRACT_ID },
+    { startLedger: 100 },
+  );
   assert.equal(result.events.length, 1);
   assert.equal(result.events[0].payload.name, "unknown");
   assert.equal(result.lastEventLedger, 150);

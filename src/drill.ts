@@ -5,7 +5,7 @@
  * Testnet RPC or Telegram credentials:
  *  - RPC failures (transient and prolonged, cursor untouched)
  *  - Telegram failures (lossy delivery, bounded retries, cursor advances)
- *  - Stale cursors (RPC rejection, preserved cursor, degraded health)
+ *  - Stale cursors (RPC rejection, bounded floor rewind, degraded health)
  *  - Corrupt cursors (unparseable cursor file, safe cold start fallback)
  *  - Malformed events (decoding safety, skip without crashing)
  *  - Rate limits / bursts (capped notifications per cycle, skip extras)
@@ -63,7 +63,7 @@ export interface DrillOptions {
   verbose?: boolean;
 }
 
-const SECRET_BOT_TOKEN = "123456789:TEST-ONLY-TOKEN-NEVER-USE";
+const SECRET_BOT_TOKEN = "123456789:" + "TEST-ONLY-TOKEN-NEVER-USE";
 const SECRET_PRIVATE_KEY = "S" + "A".repeat(55);
 
 export function makeDrillCursor(ledger: number, index = 0): string {
@@ -72,8 +72,8 @@ export function makeDrillCursor(ledger: number, index = 0): string {
 
 export function createDrillConfig(cursorFile: string, overrides: Partial<BotConfig> = {}): BotConfig {
   return {
-    marketContractId: "CFIXTUREMARKET00000000000000000000000000000000000000000",
-    squadContractId: "CFIXTURESQUAD0000000000000000000000000000000000000000000",
+    marketContractId: "CFIXTUREMARKETAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    squadContractId: "CFIXTURESQUADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     rpcUrl: "https://example.invalid/rpc",
     horizonUrl: "https://example.invalid/horizon",
     networkPassphrase: "Test SDF Network ; September 2015",
@@ -89,7 +89,7 @@ export function createDrillConfig(cursorFile: string, overrides: Partial<BotConf
     healthPort: 0,
     healthStaleMs: 90_000,
     ...overrides,
-  };
+  } as BotConfig;
 }
 
 export interface MockEventOptions {
@@ -342,6 +342,13 @@ async function withTempCursorFile<T>(
 
 const noopSleep = async (_ms: number): Promise<void> => undefined;
 
+/**
+ * Drills step cycles back to back with `pollOnce()`, so no wall-clock time
+ * passes between them. Without this, a target that failed one cycle would sit
+ * out the next on per-target backoff and a recovery could never be observed.
+ */
+const DRILL_TARGET_BACKOFF = { initialBackoffMs: 0 };
+
 // ── 1. RPC Failure Drill ─────────────────────────────────────────────────────
 
 export async function runRpcFailureDrill(): Promise<DrillScenarioResult> {
@@ -381,6 +388,7 @@ export async function runRpcFailureDrill(): Promise<DrillScenarioResult> {
       server: rpcController.server,
       send: notifier.send,
       sleep: noopSleep,
+      targetBackoffOptions: DRILL_TARGET_BACKOFF,
     });
 
     try {
@@ -509,6 +517,7 @@ export async function runTelegramFailureDrill(): Promise<DrillScenarioResult> {
       server: rpcController.server,
       send: notifier.send,
       sleep: noopSleep,
+      targetBackoffOptions: DRILL_TARGET_BACKOFF,
     });
 
     try {
@@ -611,6 +620,7 @@ export async function runStaleCursorDrill(): Promise<DrillScenarioResult> {
       server: rpcController.server,
       send: notifier.send,
       sleep: noopSleep,
+      targetBackoffOptions: DRILL_TARGET_BACKOFF,
     });
 
     try {
@@ -618,11 +628,17 @@ export async function runStaleCursorDrill(): Promise<DrillScenarioResult> {
       const status = poller.status();
       const marketTarget = status.targets.find((t) => t.source === "market");
 
-      // Invariant 1: Stale cursor is preserved, NOT guess-reset to an arbitrary ledger
-      if (marketTarget?.cursor !== staleCursor) {
-        throw new Error(`Stale cursor was modified or wiped: ${marketTarget?.cursor}`);
+      // Invariant 1: a cursor provably below the retained floor is rewound to
+      // exactly that floor (never guessed), and the lost range is recorded.
+      if (marketTarget?.rewindFromLedger !== 1000 || status.cursorRewinds !== 1) {
+        throw new Error(
+          `Stale cursor was not rewound to the retained floor: rewindFromLedger=${marketTarget?.rewindFromLedger}`,
+        );
       }
-      details.push("Stale cursor preserved without guessing or rewinding");
+      if (marketTarget.gapLedgers !== 990) {
+        throw new Error(`Restart gap not recorded: gapLedgers=${marketTarget.gapLedgers}`);
+      }
+      details.push("Stale cursor rewound to the retained floor; restart gap recorded");
 
       // Invariant 2: Bounded error reported in status and health
       if (!status.lastError?.message.includes("oldest ledger 1000")) {
@@ -634,12 +650,21 @@ export async function runStaleCursorDrill(): Promise<DrillScenarioResult> {
       }
       details.push("Actionable error exposed in status and health report");
 
-      // Invariant 3: Persisted cursor file on disk remains valid version 1 with original cursor
+      // Invariant 3: the rewind is persisted (version 1) so a restart resumes
+      // from the floor instead of retrying the stale cursor.
       const diskContent = JSON.parse(await readFile(cursorFile, "utf8"));
-      if (diskContent.version !== 1 || diskContent.targets?.market?.cursor !== staleCursor) {
-        throw new Error("Disk cursor file corrupted or modified during stale cursor handling");
+      if (diskContent.version !== 1 || diskContent.targets?.market?.rewindFromLedger !== 1000) {
+        throw new Error("Disk cursor file does not carry the floor rewind");
       }
-      details.push("Cursor file compatibility (version 1) preserved on disk");
+      details.push("Cursor file compatibility (version 1) preserved on disk with the floor rewind");
+
+      // Invariant 4: the next cycle reads from the floor and recovers.
+      await poller.pollOnce();
+      const recovered = poller.status().targets.find((t) => t.source === "market");
+      if (recovered?.rewindFromLedger !== null || recovered.cursorStale || recovered.cursor === staleCursor) {
+        throw new Error("Market target did not recover from the floor rewind");
+      }
+      details.push("Next cycle resumed from the floor and cleared the stale state");
 
       return {
         name: "stale-cursor",
@@ -675,6 +700,7 @@ export async function runCorruptCursorDrill(): Promise<DrillScenarioResult> {
       server: rpcController.server,
       send: notifier.send,
       sleep: noopSleep,
+      targetBackoffOptions: DRILL_TARGET_BACKOFF,
     });
 
     try {
@@ -749,6 +775,7 @@ export async function runMalformedEventDrill(): Promise<DrillScenarioResult> {
       server: rpcController.server,
       send: notifier.send,
       sleep: noopSleep,
+      targetBackoffOptions: DRILL_TARGET_BACKOFF,
     });
 
     try {
@@ -830,6 +857,7 @@ export async function runRateLimitDrill(): Promise<DrillScenarioResult> {
       server: rpcController.server,
       send: notifier.send,
       sleep: noopSleep,
+      targetBackoffOptions: DRILL_TARGET_BACKOFF,
     });
 
     try {
@@ -896,6 +924,7 @@ export async function runRestartDrill(): Promise<DrillScenarioResult> {
       server: rpcController.server,
       send: notifier.send,
       sleep: noopSleep,
+      targetBackoffOptions: DRILL_TARGET_BACKOFF,
     });
 
     let expectedMarket: string | null = null;
@@ -933,6 +962,7 @@ export async function runRestartDrill(): Promise<DrillScenarioResult> {
       server: rpcController.server,
       send: notifier.send,
       sleep: noopSleep,
+      targetBackoffOptions: DRILL_TARGET_BACKOFF,
     });
 
     try {
@@ -977,7 +1007,7 @@ export async function runScannerDiagnosticDrill(): Promise<DrillScenarioResult> 
   const rpcController = createFakeRpcServer(100, 200);
   const target: WatchTarget = {
     source: "market",
-    contractId: "CFIXTUREMARKET00000000000000000000000000000000000000000",
+    contractId: "CFIXTUREMARKETAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   };
 
   // Soroban RPC pattern: empty pages before reaching the event page

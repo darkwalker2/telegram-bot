@@ -59,6 +59,7 @@ import {
   isAdminPayload,
   shortAddress,
   sortEvents,
+  normalizeContractVersion,
   summarizePayloadForLog,
   type ContractSource,
   type DecodedEvent,
@@ -115,6 +116,8 @@ export interface RawScan {
   /** True when `maxPages` stopped the walk before the tip. */
   truncated: boolean;
   pages: number;
+  /** Pages the RPC returned with zero events (the Soroban norm on a quiet chain). */
+  emptyPages: number;
   /** Events dropped because an earlier page or cycle already returned them. */
   duplicates: number;
   /**
@@ -165,7 +168,7 @@ export function eventCursorLedger(cursor: string): number | null {
   try {
     const toid = BigInt(toidText);
     const index = BigInt(indexText);
-    if (toid > 18_446_744_073_709_551_615n || index > 4_294_967_295n) return null;
+    if (toid > MAX_UINT64 || index > MAX_UINT32) return null;
     return Number(toid >> 32n);
   } catch {
     return null;
@@ -214,7 +217,11 @@ export async function paginatedGetEvents(
   // scan output can report how long the network cost, not just how many pages
   // it took. Bounded to counts and milliseconds; no payload is retained.
   const timing = new RpcTiming();
-  const window = validateLedgerWindow(await timing.measure("health", () => server.getHealth()));
+  // A caller-cached tip (one per poll cycle) replaces this walk's own health
+  // read; a one-shot scan still fetches its own.
+  const window = validateLedgerWindow(
+    opts.ledgerTip ?? (await timing.measure("health", () => server.getHealth())),
+  );
   const oldestLedger = window.oldestLedger;
 
   // One window for the whole walk, pre-seeded with what earlier cycles have
@@ -224,13 +231,6 @@ export async function paginatedGetEvents(
   for (const id of opts.seenEventIds ?? []) dedup.add(id);
 
   let cursor: string | undefined = opts.cursor;
-  if (cursor) {
-    const cLedger = eventCursorLedger(cursor);
-    if (cLedger !== null && cLedger < oldestLedger) {
-      console.error(`[scanner] cursor ledger ${cLedger} is older than retained window ${oldestLedger}, discarding`);
-      cursor = undefined;
-    }
-  }
 
   const events: rpc.Api.EventResponse[] = [];
   let lastCursor: string | null = cursor ?? null;
@@ -286,9 +286,9 @@ export async function paginatedGetEvents(
         : server.getEvents({ filters, startLedger: firstStartLedger, limit }),
     );
 
-    if (response.events.length === 0) emptyPages += 1;
-    latestLedger = response.latestLedger;
+    // A malformed page (non-array `events`) is an empty page, not a crash.
     const rawEvents = Array.isArray(response?.events) ? response.events : [];
+    if (rawEvents.length === 0) emptyPages += 1;
     // Drop anything an earlier page (or an earlier cycle) already produced.
     // Order is preserved: the first occurrence wins, matching the RPC's own
     // event ordering.
@@ -368,7 +368,7 @@ export async function readContractEvents(
   const decoded: DecodedEvent[] = [];
   for (const event of rawEvents) {
     if (!event || typeof event !== "object") continue;
-    decoded.push(decodeEvent(target.source, event));
+    decoded.push(decodeEvent(target.source, event, target.version));
   }
 
   // Deterministic order from chain metadata (ledger → transaction index →
@@ -380,13 +380,14 @@ export async function readContractEvents(
   return {
     source: target.source,
     contractId: target.contractId,
-    version,
+    version: normalizeContractVersion(target.version),
     events,
     cursor: scan.cursor,
     latestLedger: scan.latestLedger,
     oldestLedger: scan.oldestLedger,
     truncated: scan.truncated,
     pages: scan.pages,
+    emptyPages: scan.emptyPages,
     duplicates: scan.duplicates,
     seenEventIds: scan.seenEventIds,
     startLedger: scan.startLedger,
@@ -471,6 +472,8 @@ function flagInt(name: string, fallback: number, min: number, max: number): numb
     process.exit(1);
   }
   return parsed;
+}
+
 /** True when `--name` appears anywhere in argv (boolean CLI switches). */
 export function hasFlag(name: string): boolean {
   return process.argv.includes(`--${name}`);
@@ -617,7 +620,7 @@ function summarize(event: DecodedEvent): string {
   };
   switch (p.name) {
     case "claim_created":
-      return `claim #${p.claimId} created by ${shortAddress(p.creator)} [${p.category}]`;
+      return `claim #${p.claimId} created by ${shortAddress(p.creator)} [${text(p.category, 80)}]`;
     case "claim_challenged":
       return `claim #${p.claimId} challenged by ${shortAddress(p.challenger)} for ${money(p.stake)}`;
     case "claim_resolved":
@@ -627,7 +630,7 @@ function summarize(event: DecodedEvent): string {
     case "challenger_paid":
       return `claim #${p.claimId} paid ${shortAddress(p.challenger)} net=${money(p.net)}`;
     case "market_created":
-      return `squad market #${p.marketId} by ${shortAddress(p.captain)}: ${p.question}`;
+      return `squad market #${p.marketId} by ${shortAddress(p.captain)}: ${text(p.question)}`;
     case "deposited":
       return `squad #${p.marketId} side=${p.side} ${shortAddress(p.participant)} deposited ${money(p.amount)}`;
     case "resolved":
@@ -645,25 +648,19 @@ function summarize(event: DecodedEvent): string {
     case "admin":
       return `admin event ${p.action}`;
     case "unknown":
-      return `unknown "${p.eventName}"${p.reason ? ` (${p.reason})` : ""}`;
+      return `unknown "${text(p.eventName, 80)}"${p.reason ? ` (${text(p.reason)})` : ""}`;
     default:
       if (isAdminPayload(p)) return `admin event ${p.name}`;
       return p.name;
   }
 }
 
-function boundedJson(value: unknown): string {
-  return JSON.stringify(value, (_key, item) => {
-    if (typeof item !== "string") return typeof item === "bigint" ? item.toString() : item;
-    const compact = item.replace(/\s+/g, " ").trim();
-    return compact.length <= 240 ? compact : `${compact.slice(0, 239)}…`;
-  });
-}
-
 async function main(): Promise<void> {
   if (flagBool("help") || flagBool("h")) {
     console.log(HELP_TEXT);
     return;
+  }
+
   // `--mock` opts into the local mock profile before config is read. An
   // explicit MIMIR_PROFILE in the environment still wins; blank counts as unset.
   if (process.argv.includes("--mock") && !process.env.MIMIR_PROFILE?.trim()) {
@@ -747,8 +744,6 @@ async function main(): Promise<void> {
       console.log(`  ${count.toString().padStart(4)}  ${name}`);
     }
 
-    const toShow = scan.events.slice(-show);
-    for (const event of toShow) {
     for (const event of show > 0 ? scan.events.slice(-show) : []) {
       console.log(`\n  ledger ${event.ledger}  tx ${event.txHash}`);
       console.log(`  ${summarize(event)}`);

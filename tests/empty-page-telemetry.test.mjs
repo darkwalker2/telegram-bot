@@ -191,7 +191,8 @@ test("poller status accumulates empty-page telemetry across cycles and targets",
     if (s.cycles >= 1 && s.lastCyclePages > 0) break;
     await new Promise((r) => setTimeout(r, 20));
   }
-  poller.stop();
+  // Drain the in-flight cycle so its cursor/status writes finish before rm.
+  await poller.shutdown({ timeoutMs: 1_000 });
 
   const status = poller.status();
   assert.ok(status.cycles >= 1, `expected >=1 cycle, got ${status.cycles}`);
@@ -207,7 +208,7 @@ test("poller status accumulates empty-page telemetry across cycles and targets",
   assert.ok(status.pagesScanned >= status.lastCyclePages);
   assert.ok(status.emptyPages <= status.pagesScanned);
 
-  await rm(tmp, { recursive: true, force: true });
+  await rm(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 
 test("poller scan failure does not inflate empty-page counters", async () => {
@@ -249,7 +250,8 @@ test("poller scan failure does not inflate empty-page counters", async () => {
     if (s.cycles >= 1 && s.consecutiveFailures >= 1 && s.lastError) break;
     await new Promise((r) => setTimeout(r, 20));
   }
-  poller.stop();
+  // Drain the in-flight cycle so its cursor/status writes finish before rm.
+  await poller.shutdown({ timeoutMs: 1_000 });
 
   const status = poller.status();
   assert.ok(status.cycles >= 1);
@@ -260,5 +262,5 @@ test("poller scan failure does not inflate empty-page counters", async () => {
   assert.ok(status.consecutiveFailures >= 1);
   assert.ok(status.lastError);
 
-  await rm(tmp, { recursive: true, force: true });
+  await rm(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });

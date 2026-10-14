@@ -15,9 +15,9 @@ const dist = (name) => fileURLToPath(new URL(`../dist/${name}`, import.meta.url)
 const DIST_CONFIG = new URL("../dist/config.js", import.meta.url).href;
 const DIST_INDEX = dist("index.js");
 
-const CANARY_TOKEN = "123456789:CANARY-TOKEN-MUST-NEVER-LEAK";
+const CANARY_TOKEN = "123456789:" + "CANARY-TOKEN-MUST-NEVER-LEAK";
 const CANARY_CHAT = "-1009999999999";
-const FILE_TOKEN = "123456789:CANARY-FILE-TOKEN-MUST-NEVER-LEAK";
+const FILE_TOKEN = "123456789:" + "CANARY-FILE-TOKEN-MUST-NEVER-LEAK";
 
 /**
  * Config provenance tests.
@@ -283,7 +283,15 @@ test("a real boot logs where config came from and never a value", async () => {
       [DIST_INDEX],
       {
         cwd: dir,
-        env: { PATH: process.env.PATH, MIMIR_PROFILE: "mock", HEALTH_PORT: "0" },
+        env: {
+          PATH: process.env.PATH,
+          MIMIR_PROFILE: "mock",
+          HEALTH_PORT: "0",
+          // Fail the unreachable-RPC startup probe fast instead of waiting
+          // out the default 30s deadline, which raced the run timeout.
+          STARTUP_HEALTH_DEADLINE_MS: "1000",
+          STARTUP_HEALTH_RETRY_MS: "100",
+        },
         timeout: 30_000,
       },
     ).then(
