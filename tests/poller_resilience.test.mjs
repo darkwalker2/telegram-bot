@@ -9,13 +9,41 @@ import { createPoller } from "../dist/poller.js";
 
 const VALID_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 const CURSOR_1999 = `${1999n << 32n}-1`;
+const MARKET_ID = "CAP3GIE7KQDU4NOEF2UPNP7YRH2ARA6KBXXFV73RNBVEGMRCIKT4BBNF";
+const SQUAD_ID = "CADTGYRIPLZRIZBQVYT7ZD6K5LG5CSLLEX53WIG5NXJLTUSEYN7ATYAQ";
+
+// Every poller a test starts is stopped even when an assertion fails first;
+// a leaked poller keeps rescheduling itself and the runner never exits.
+const livePollers = new Set();
+const realCreatePoller = createPoller;
+function trackedPoller(deps) {
+  const poller = realCreatePoller(deps);
+  livePollers.add(poller);
+  return poller;
+}
+/** Poll `predicate` until it holds or `timeoutMs` elapses (no fixed sleeps). */
+async function waitFor(predicate, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+const marketCursor = (poller) =>
+  poller.status().targets.find((t) => t.source === "market")?.cursor;
+
+test.afterEach(async () => {
+  const pollers = [...livePollers];
+  livePollers.clear();
+  await Promise.all(pollers.map((p) => p.stop()));
+});
 
 function mockConfig(cursorFile) {
   return {
     botToken: "test-token",
     chatId: "-1001234567890",
-    marketContractId: "CCONTRACTMARKET",
-    squadContractId: "CCONTRACTSQUAD",
+    marketContractId: MARKET_ID,
+    squadContractId: SQUAD_ID,
     rpcUrl: "https://soroban-testnet.stellar.org",
     horizonUrl: "https://horizon-testnet.stellar.org",
     networkPassphrase: "Test SDF Network ; September 2015",
@@ -61,7 +89,7 @@ test("poller initializes and handles cold start when cursor file is missing", as
   const sent = [];
   const send = async (msg) => { sent.push(msg); };
 
-  const poller = createPoller({ config, server, send });
+  const poller = trackedPoller({ config, server, send });
   await poller.start();
   const status = poller.status();
 
@@ -85,7 +113,7 @@ test("poller persists cursor upon successful cycle and reloads upon restart", as
   });
 
   const send = async () => {};
-  const poller = createPoller({ config, server, send });
+  const poller = trackedPoller({ config, server, send });
   await poller.start();
 
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -96,7 +124,7 @@ test("poller persists cursor upon successful cycle and reloads upon restart", as
   assert.equal(saved.version, 1);
   assert.equal(saved.targets.market.cursor, CURSOR_1999);
 
-  const poller2 = createPoller({ config, server, send });
+  const poller2 = trackedPoller({ config, server, send });
   await poller2.start();
   const status2 = poller2.status();
   const marketTarget = status2.targets.find((t) => t.source === "market");
@@ -122,7 +150,7 @@ test("poller continues and does not lose cursor state during transient RPC failu
     },
   };
 
-  const poller = createPoller({ config, server, send: async () => {} });
+  const poller = trackedPoller({ config, server, send: async () => {} });
   await poller.start();
   await new Promise((r) => setTimeout(r, 80));
 
@@ -157,7 +185,7 @@ test("poller logs and handles Telegram send retries/failures without stalling cu
       return {
         events: [
           {
-            contractId: req.filters?.[0]?.contractIds?.[0] ?? "CCONTRACTMARKET",
+            contractId: req.filters?.[0]?.contractIds?.[0] ?? MARKET_ID,
             ledger: 100,
             txHash: "0x1234",
             ledgerClosedAt: "2026-01-01T00:00:00Z",
@@ -176,7 +204,7 @@ test("poller logs and handles Telegram send retries/failures without stalling cu
     throw new Error("Telegram 429 Too Many Requests");
   };
 
-  const poller = createPoller({ config, server, send, sendOptions: { sendSpacingMs: 0, initialBackoffMs: 10 } });
+  const poller = trackedPoller({ config, server, send, sendOptions: { sendSpacingMs: 0, initialBackoffMs: 10 } });
   await poller.start();
   await new Promise((r) => setTimeout(r, 200));
 
@@ -209,7 +237,7 @@ test("poller times out a hung Telegram send and continues without stalling curso
       return {
         events: [
           {
-            contractId: req.filters?.[0]?.contractIds?.[0] ?? "CCONTRACTMARKET",
+            contractId: req.filters?.[0]?.contractIds?.[0] ?? MARKET_ID,
             ledger: 100,
             txHash: "0x1234",
             ledgerClosedAt: "2026-01-01T00:00:00Z",
@@ -230,9 +258,9 @@ test("poller times out a hung Telegram send and continues without stalling curso
     await new Promise(() => {});
   };
 
-  const poller = createPoller({ config, server, send });
+  const poller = trackedPoller({ config, server, send, sendOptions: { initialBackoffMs: 1 } });
   await poller.start();
-  await new Promise((r) => setTimeout(r, 250));
+  await waitFor(() => marketCursor(poller) === CURSOR_1999);
 
   assert.equal(sendStarted, true, "send should have been attempted");
   const status = poller.status();
@@ -266,7 +294,7 @@ test("poller send timeout is bounded and does not leak pending timers across cyc
       return {
         events: [
           {
-            contractId: req.filters?.[0]?.contractIds?.[0] ?? "CCONTRACTMARKET",
+            contractId: req.filters?.[0]?.contractIds?.[0] ?? MARKET_ID,
             ledger: 100,
             txHash: `0x${cycle}`,
             ledgerClosedAt: "2026-01-01T00:00:00Z",
@@ -285,7 +313,7 @@ test("poller send timeout is bounded and does not leak pending timers across cyc
     await new Promise(() => {});
   };
 
-  const poller = createPoller({ config, server, send });
+  const poller = trackedPoller({ config, server, send, sendOptions: { initialBackoffMs: 1 } });
   await poller.start();
   await new Promise((r) => setTimeout(r, 200));
 
@@ -317,7 +345,7 @@ test("poller respects sendTimeoutMs override via sendOptions", async () => {
       return {
         events: [
           {
-            contractId: req.filters?.[0]?.contractIds?.[0] ?? "CCONTRACTMARKET",
+            contractId: req.filters?.[0]?.contractIds?.[0] ?? MARKET_ID,
             ledger: 100,
             txHash: "0x1234",
             ledgerClosedAt: "2026-01-01T00:00:00Z",
@@ -336,7 +364,7 @@ test("poller respects sendTimeoutMs override via sendOptions", async () => {
     await new Promise(() => {});
   };
 
-  const poller = createPoller({
+  const poller = trackedPoller({
     config,
     server,
     send,
@@ -372,7 +400,7 @@ test("poller send timeout does not fire when send resolves before deadline", asy
       return {
         events: [
           {
-            contractId: req.filters?.[0]?.contractIds?.[0] ?? "CCONTRACTMARKET",
+            contractId: req.filters?.[0]?.contractIds?.[0] ?? MARKET_ID,
             ledger: 100,
             txHash: "0x1234",
             ledgerClosedAt: "2026-01-01T00:00:00Z",
@@ -392,7 +420,7 @@ test("poller send timeout does not fire when send resolves before deadline", asy
     sent.push(msg);
   };
 
-  const poller = createPoller({ config, server, send });
+  const poller = trackedPoller({ config, server, send, sendOptions: { initialBackoffMs: 1 } });
   await poller.start();
   await new Promise((r) => setTimeout(r, 200));
 
@@ -424,7 +452,7 @@ test("poller send timeout preserves cursor across restart", async () => {
       return {
         events: [
           {
-            contractId: req.filters?.[0]?.contractIds?.[0] ?? "CCONTRACTMARKET",
+            contractId: req.filters?.[0]?.contractIds?.[0] ?? MARKET_ID,
             ledger: 100,
             txHash: "0x1234",
             ledgerClosedAt: "2026-01-01T00:00:00Z",
@@ -443,17 +471,17 @@ test("poller send timeout preserves cursor across restart", async () => {
     await new Promise(() => {});
   };
 
-  const poller = createPoller({ config, server, send });
+  const poller = trackedPoller({ config, server, send, sendOptions: { initialBackoffMs: 1 } });
   await poller.start();
-  await new Promise((r) => setTimeout(r, 200));
-  poller.stop();
+  await waitFor(() => marketCursor(poller) === CURSOR_1999);
+  await poller.shutdown({ timeoutMs: 1000 });
 
   const savedRaw = await readFile(cursorFile, "utf8");
   const saved = JSON.parse(savedRaw);
   assert.equal(saved.version, 1);
   assert.equal(saved.targets.market.cursor, CURSOR_1999);
 
-  const poller2 = createPoller({ config, server, send: async () => {} });
+  const poller2 = trackedPoller({ config, server, send: async () => {} });
   await poller2.start();
   const status2 = poller2.status();
   const marketTarget = status2.targets.find((t) => t.source === "market");
@@ -477,7 +505,7 @@ test("poller circuit breaker opens after consecutive RPC failures", async () => 
     },
   };
 
-  const poller = createPoller({
+  const poller = trackedPoller({
     config,
     server,
     send: async () => {},
@@ -511,7 +539,7 @@ test("poller circuit breaker skips RPC calls when open", async () => {
     },
   };
 
-  const poller = createPoller({
+  const poller = trackedPoller({
     config,
     server,
     send: async () => {},
@@ -555,7 +583,7 @@ test("poller circuit breaker closes after cooldown and successful RPC", async ()
     },
   };
 
-  const poller = createPoller({
+  const poller = trackedPoller({
     config,
     server,
     send: async () => {},
@@ -599,7 +627,7 @@ test("poller circuit breaker resets on successful RPC before threshold", async (
     },
   };
 
-  const poller = createPoller({
+  const poller = trackedPoller({
     config,
     server,
     send: async () => {},

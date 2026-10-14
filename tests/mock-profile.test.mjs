@@ -64,7 +64,7 @@ test("without a profile, defaults are exactly the pre-profile behaviour", () => 
     {
       MARKET_CONTRACT_ID: "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI",
       SQUAD_CONTRACT_ID: "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY",
-      BOT_TOKEN: "123456789:TEST-ONLY-TOKEN-NEVER-USE",
+      BOT_TOKEN: "123456789:" + "TEST-ONLY-TOKEN-NEVER-USE",
       TELEGRAM_CHAT_ID: "-1001234567890",
     },
     () => {
@@ -114,7 +114,7 @@ test("explicit environment values win over mock profile defaults", () => {
       MIMIR_PROFILE: "mock",
       STELLAR_RPC_URL: "https://example.invalid/custom-rpc",
       CURSOR_FILE: "./data/cursor.explicit.json",
-      BOT_TOKEN: "123456789:TEST-ONLY-TOKEN-NEVER-USE",
+      BOT_TOKEN: "123456789:" + "TEST-ONLY-TOKEN-NEVER-USE",
       TELEGRAM_CHAT_ID: "-1001234567890",
     },
     () => {

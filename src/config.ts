@@ -51,6 +51,31 @@ import {
   parseNotificationFeatureFlags,
   type NotificationFeatureFlags,
 } from "./notifications/featureFlags.js";
+
+/** Named Stellar networks the bot understands. `custom` is any other passphrase. */
+export type StellarNetwork = "testnet" | "mainnet" | "futurenet" | "custom";
+
+/** Well-known passphrase for each named network. */
+export const NETWORK_PASSPHRASES: Record<Exclude<StellarNetwork, "custom">, string> = {
+  testnet: "Test SDF Network ; September 2015",
+  mainnet: "Public Global Stellar Network ; September 2015",
+  futurenet: "Test SDF Future Network ; October 2022",
+};
+
+/** Well-known RPC URLs for each named network. */
+export const NETWORK_RPC_URLS: Record<Exclude<StellarNetwork, "custom">, string> = {
+  testnet: "https://soroban-testnet.stellar.org",
+  mainnet: "https://mainnet.sorobanrpc.com",
+  futurenet: "https://rpc-futurenet.stellar.org",
+};
+
+/** Well-known Horizon URLs for each named network. */
+export const NETWORK_HORIZON_URLS: Record<Exclude<StellarNetwork, "custom">, string> = {
+  testnet: "https://horizon-testnet.stellar.org",
+  mainnet: "https://horizon.stellar.org",
+  futurenet: "https://horizon-futurenet.stellar.org",
+};
+
 /**
  * The environment as it was before the `.env` file was merged in.
  *
@@ -157,6 +182,8 @@ export interface BotConfig extends StellarConfig {
   version: string;
   botToken: string;
   chatId: string;
+  /** Every chat id listed in TELEGRAM_CHAT_ID; `chatId` is the first. */
+  chatIds?: string[];
   /** Optional per-contract destinations; absent values use `chatId`. */
   marketChatId?: string;
   squadChatId?: string;
@@ -171,6 +198,12 @@ export interface BotConfig extends StellarConfig {
   lockFile: string;
   statusFile: string;
   maxNotificationsPerCycle: number;
+  /** Pause between Telegram sends within a cycle (INTER_SEND_DELAY_MS). */
+  interSendDelayMs: number;
+  /** Port for the Prometheus `/metrics` listener; null disables it. */
+  metricsPort: number | null;
+  /** Optional allowlist of claim categories to notify about. Empty means allow all. */
+  notificationCategories: readonly string[];
   /** Path for the standalone scanner's CSV output (see CSV_OUTPUT_FILE). */
   csvOutputFile: string;
   /** Coarse notification feature flags (see NOTIFY_* env vars). */
@@ -217,10 +250,27 @@ export interface BotConfig extends StellarConfig {
   shutdownTimeoutMs: number;
   /** Wall-clock budget for a single Telegram send before it is abandoned. */
   telegramSendTimeoutMs: number;
+  /** Alias of `telegramSendTimeoutMs` accepted from hand-built configs. */
+  sendTimeoutMs?: number;
   /** When true, notifications sent to Telegram are formatted in preview mode. */
   channelPreviewMode: boolean;
-  /** Per-chat notification preferences. */
-  routes: TelegramRoute[];
+  /** Show Telegram link previews on market notifications (LINK_PREVIEW_MARKET). */
+  linkPreviewMarket: boolean;
+  /** Show Telegram link previews on squad notifications (LINK_PREVIEW_SQUAD). */
+  linkPreviewSquad: boolean;
+  /** Per-chat notification preferences. Optional; absent means the single chat route. */
+  routes?: TelegramRoute[];
+  /**
+   * Identical RPC/poller error lines allowed per key per sampling window.
+   * Repeats beyond this are counted and reported as one summary line.
+   */
+  logSampleMaxPerWindow: number;
+  /** Sampling window for repetitive error logs, in milliseconds. */
+  logSampleWindowMs: number;
+  /** Recent console lines kept (redacted) for /export. `0` disables capture. */
+  logBufferLines: number;
+  /** Optional public URL to run the bot in webhook mode instead of long-polling. */
+  telegramWebhookUrl: string | null;
 }
 
 /** Fallback drain budget when a config object predates `SHUTDOWN_TIMEOUT_MS`. */
@@ -255,6 +305,7 @@ const DEFAULTS = {
   lockFile: "./data/poller.lock",
   statusFile: "./data/status.json",
   maxNotificationsPerCycle: 20,
+  interSendDelayMs: 1_500,
   csvOutputFile: "./data/scanner_output.csv",
   auditFile: "./data/audit.jsonl",
   dedupWindow: 256,
@@ -275,11 +326,14 @@ const DEFAULTS = {
   // enough for a normal API round-trip on a slow link.
   telegramSendTimeoutMs: DEFAULT_TELEGRAM_SEND_TIMEOUT_MS,
   channelPreviewMode: false,
+  linkPreviewMarket: false,
+  linkPreviewSquad: false,
   logSampleMaxPerWindow: 3,
   // ~10 default poll cycles of a down RPC, collapsed into one line plus a
   // summary. Long enough not to hide a flapping error, short enough to bound
   // an outage that lasts for hours.
   logSampleWindowMs: 300_000,
+  logBufferLines: 500,
 } as const;
 
 /**
@@ -469,6 +523,8 @@ function collector(profile: Record<string, string>) {
         return null;
       }
       return parsed;
+    },
+
     optionalChatId(name: string, fallback: string): string {
       const value = read(name) ?? fallback;
       if (value === "") return value;
@@ -572,7 +628,15 @@ function notificationCategoriesFrom(): readonly string[] {
 }
 
 function stellarFrom(c: ReturnType<typeof collector>): StellarConfig {
-  const network = c.network("STELLAR_NETWORK", DEFAULTS.network);
+  // An explicit STELLAR_NETWORK wins; otherwise an explicit passphrase names
+  // the network (beating a profile's default), so a passphrase-only deployment
+  // is not mislabelled testnet.
+  const passphraseOverride = read("STELLAR_NETWORK_PASSPHRASE");
+  const namedNetwork =
+    read("STELLAR_NETWORK") !== undefined || passphraseOverride === undefined
+      ? c.network("STELLAR_NETWORK", DEFAULTS.network)
+      : undefined;
+  const network = namedNetwork ?? inferNetwork(passphraseOverride ?? "");
   const namedDefaults = network !== "custom" ? {
     rpcUrl: NETWORK_RPC_URLS[network],
     horizonUrl: NETWORK_HORIZON_URLS[network],
@@ -584,9 +648,12 @@ function stellarFrom(c: ReturnType<typeof collector>): StellarConfig {
   };
 
   return {
-    network,
+    // Left unset when only a passphrase was given, so labels infer from it.
+    ...(namedNetwork !== undefined ? { network: namedNetwork } : {}),
     marketContractId: c.contractId("MARKET_CONTRACT_ID"),
     squadContractId: c.contractId("SQUAD_CONTRACT_ID"),
+    marketContractVersion: c.contractVersion("MARKET_CONTRACT_VERSION", "v1"),
+    squadContractVersion: c.contractVersion("SQUAD_CONTRACT_VERSION", "v1"),
     rpcUrl: c.url("STELLAR_RPC_URL", namedDefaults.rpcUrl),
     horizonUrl: c.url("STELLAR_HORIZON_URL", namedDefaults.horizonUrl),
     networkPassphrase: c.get("STELLAR_NETWORK_PASSPHRASE") ?? namedDefaults.passphrase,
@@ -625,12 +692,14 @@ export function loadConfig(): BotConfig {
     NOTIFY_SQUAD: read("NOTIFY_SQUAD"),
   });
   for (const problem of featureFlagsParsed.problems) c.problems.push(problem);
+  const chatIds = c.chatIds("TELEGRAM_CHAT_ID");
 
   const config: BotConfig = {
     ...stellar,
     version: APP_VERSION,
     botToken: c.required("BOT_TOKEN"),
-    chatId: c.chatId("TELEGRAM_CHAT_ID"),
+    chatId: chatIds[0] ?? "",
+    chatIds,
     marketChatId: c.optionalChatId("TELEGRAM_MARKET_CHAT_ID", c.get("TELEGRAM_CHAT_ID") ?? ""),
     squadChatId: c.optionalChatId("TELEGRAM_SQUAD_CHAT_ID", c.get("TELEGRAM_CHAT_ID") ?? ""),
     allowedChatIds: c.allowedChatIds("ALLOWED_CHAT_IDS"),
@@ -645,6 +714,9 @@ export function loadConfig(): BotConfig {
       DEFAULTS.maxNotificationsPerCycle,
       1,
     ),
+    interSendDelayMs: c.int("INTER_SEND_DELAY_MS", DEFAULTS.interSendDelayMs, 0),
+    metricsPort: c.optionalPort("METRICS_PORT"),
+    notificationCategories: notificationCategoriesFrom(),
     csvOutputFile: path.resolve(process.cwd(), c.get("CSV_OUTPUT_FILE") ?? DEFAULTS.csvOutputFile),
     featureFlags: featureFlagsParsed.flags,
     // Resolved like the cursor file: relative paths anchor to the process cwd.
@@ -684,6 +756,8 @@ export function loadConfig(): BotConfig {
       0,
     ),
     channelPreviewMode: c.bool("CHANNEL_PREVIEW_MODE", DEFAULTS.channelPreviewMode),
+    linkPreviewMarket: c.bool("LINK_PREVIEW_MARKET", DEFAULTS.linkPreviewMarket),
+    linkPreviewSquad: c.bool("LINK_PREVIEW_SQUAD", DEFAULTS.linkPreviewSquad),
     logSampleMaxPerWindow: c.int(
       "LOG_SAMPLE_MAX_PER_WINDOW",
       DEFAULTS.logSampleMaxPerWindow,
@@ -691,6 +765,8 @@ export function loadConfig(): BotConfig {
     ),
     // A window of 1ms is legal but pointless; 1s is the smallest useful unit.
     logSampleWindowMs: c.int("LOG_SAMPLE_WINDOW_MS", DEFAULTS.logSampleWindowMs, 1_000),
+    logBufferLines: c.int("LOG_BUFFER_LINES", DEFAULTS.logBufferLines, 0),
+    telegramWebhookUrl: c.optionalUrl("TELEGRAM_WEBHOOK_URL"),
   };
 
   if (c.problems.length > 0) throw new ConfigError(c.problems);
@@ -699,12 +775,16 @@ export function loadConfig(): BotConfig {
 
 /** Display label for the active Stellar network. */
 export function networkLabel(config: StellarConfig): string {
-  const net = config.network ?? inferNetwork(config.networkPassphrase);
+  // A named STELLAR_NETWORK is reported by the name the operator chose.
+  if (config.network !== undefined && config.network !== "custom") return config.network;
+  const net = inferNetwork(config.networkPassphrase);
   if (net === "custom") {
     if (config.networkPassphrase === MOCK_NETWORK_PASSPHRASE) return "mock";
     return "custom";
   }
-  return net;
+  // Inferred from the passphrase alone: Stellar's own name for its main
+  // network is "public" (the passphrase itself, stellar.expert).
+  return net === "mainnet" ? "public" : net;
 }
 
 /** Derive a StellarNetwork from a passphrase when the field is absent (backward compat). */

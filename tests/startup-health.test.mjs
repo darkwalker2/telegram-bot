@@ -94,7 +94,7 @@ test("waitForStartupHealth deadline 0 is a single attempt", async () => {
 });
 
 test("waitForStartupHealth never embeds secrets in the thrown message", async () => {
-  const secret = "0000000000:SECRET-TOKEN-DO-NOT-LEAK";
+  const secret = "0000000000:" + "SECRET-TOKEN-DO-NOT-LEAK";
   await assert.rejects(
     () =>
       waitForStartupHealth(

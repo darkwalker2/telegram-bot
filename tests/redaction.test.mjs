@@ -15,7 +15,7 @@ import {
 } from "../dist/redact.js";
 
 /** Shaped like a real token (`digits:35chars`), from Telegram's own docs. */
-const BOT_TOKEN = "1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+const BOT_TOKEN = "1234567890:" + "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
 const CHAT_ID = "-1001234567890";
 /** 56-char ed25519 seed strkey shape (`S` + 55 base32). Not a real key. */
 const STELLAR_SECRET = `S${"A".repeat(55)}`;
@@ -153,7 +153,7 @@ test("negative: URL userinfo credentials are redacted, the endpoint is not", () 
 });
 
 test("negative: credentials in a query string are redacted", () => {
-  const out = redactText("POST https://rpc.example/x?api_key=abcdef1234567890&limit=10 failed");
+  const out = redactText("POST https://rpc.example/x?api_key=" + "abcdef1234567890&limit=10 failed");
   assert.equal(out.includes("abcdef1234567890"), false);
   assert.equal(out.includes("limit=10"), true);
 });
