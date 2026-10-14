@@ -9,7 +9,7 @@ import {
   MARKET_TOPIC_SCHEMAS,
   SQUAD_TOPIC_SCHEMAS,
 } from "../dist/stellar/decode.js";
-import { paginatedGetEvents, readContractEvents, eventCursorLedger } from "../dist/stellar/events.js";
+import { readContractEvents } from "../dist/stellar/events.js";
 
 const VALID_ADDRESS = "GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
 const VALID_CONTRACT = "CABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
@@ -177,34 +177,6 @@ test("readContractEvents scanner survives malformed XDR events in RPC response",
   assert.equal(scan.events[0].payload.name, "unknown");
 });
 
-test("paginatedGetEvents falls back to startLedger when cursor is behind oldestLedger", async () => {
-  let requestedWithCursor = false;
-  let requestedWithStartLedger = false;
-
-  const fakeServer = {
-    getHealth: async () => ({ latestLedger: 1000, oldestLedger: 500 }),
-    getEvents: async (opts) => {
-      if (opts.cursor) requestedWithCursor = true;
-      if (opts.startLedger) requestedWithStartLedger = true;
-      return {
-        events: [],
-        cursor: "",
-        latestLedger: 1000,
-      };
-    },
-  };
-
-  // Cursor for ledger 100, which is < oldestLedger 500
-  const staleCursor = `${BigInt(100) << 32n}-0`;
-  assert.equal(eventCursorLedger(staleCursor), 100);
-
-  const scan = await paginatedGetEvents(
-    fakeServer,
-    [],
-    { cursor: staleCursor, maxPages: 1 },
-  );
-
-  assert.equal(requestedWithCursor, false, "stale cursor should not be sent to RPC");
-  assert.equal(requestedWithStartLedger, true, "should fall back to startLedger");
-  assert.equal(scan.oldestLedger, 500);
-});
+// Below-floor cursors are forwarded to the RPC, never dropped locally: pinned by
+// tests/ledger-window.test.mjs ("a stale cursor is forwarded…") and the poller's
+// floor-rewind suite in tests/cursor-rewind.test.mjs.

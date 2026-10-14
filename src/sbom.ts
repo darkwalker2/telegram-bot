@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 
 /**
@@ -101,44 +102,58 @@ function computeChecksum(filePath: string): string {
   }
 }
 
+/** A discovered package plus the checksum of its manifest. */
+interface DiscoveredPackage extends PackageInfo {
+  manifestChecksum: string;
+}
+
+/** Package directories directly under a node_modules folder, scoped ones included. */
+function packageDirs(nodeModulesDir: string): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(nodeModulesDir);
+  } catch {
+    return [];
+  }
+  const dirs: string[] = [];
+  for (const name of names) {
+    if (name.startsWith(".")) continue;
+    const full = join(nodeModulesDir, name);
+    if (name.startsWith("@")) {
+      let scoped: string[] = [];
+      try {
+        scoped = readdirSync(full);
+      } catch {
+        // Unreadable scope directory: skip it.
+      }
+      for (const inner of scoped) dirs.push(join(full, inner));
+    } else {
+      dirs.push(full);
+    }
+  }
+  return dirs;
+}
+
 /**
- * Discover all packages in node_modules.
+ * Discover all packages in node_modules, including nested node_modules
+ * folders. Each package directory is visited once.
  */
-function discoverPackages(rootDir: string): PackageInfo[] {
-  const packages: PackageInfo[] = [];
+function discoverPackages(rootDir: string): DiscoveredPackage[] {
+  const packages: DiscoveredPackage[] = [];
   const visited = new Set<string>();
 
-  function scan(dir: string): void {
-    if (visited.has(dir)) return;
-    visited.add(dir);
-
-    const pkgPath = join(dir, "package.json");
-    const pkg = readPackageJson(pkgPath);
-    if (pkg) {
-      packages.push(pkg);
-    }
-
-    // Recurse into subdirectories
-    try {
-      const entries = readFileSync(dir, "utf-8");
-      // This is a placeholder; actual implementation would use fs.readdirSync
-      // For now, we rely on the fact that node_modules structure is flat for
-      // most dependencies, and nested ones are handled by their own package.json
-    } catch {
-      // Ignore directory read errors
+  function scan(nodeModulesDir: string): void {
+    for (const dir of packageDirs(nodeModulesDir)) {
+      if (visited.has(dir)) continue;
+      visited.add(dir);
+      const pkgPath = join(dir, "package.json");
+      const pkg = readPackageJson(pkgPath);
+      if (pkg) packages.push({ ...pkg, manifestChecksum: computeChecksum(pkgPath) });
+      scan(join(dir, "node_modules"));
     }
   }
 
-  // Start from root node_modules
-  const nodeModulesDir = join(rootDir, "node_modules");
-  try {
-    const entries = readFileSync(nodeModulesDir, "utf-8");
-    // Placeholder for actual directory scanning
-    // In a real implementation, we would use fs.readdirSync and recurse
-  } catch {
-    // Ignore errors
-  }
-
+  scan(join(rootDir, "node_modules"));
   return packages;
 }
 
@@ -173,6 +188,9 @@ export function generateSbom(rootDir: string = process.cwd()): SbomDocument {
       licenseConcluded: pkg.license ?? "NOASSERTION",
       licenseDeclared: pkg.license ?? "NOASSERTION",
       copyrightText: "NOASSERTION",
+      ...(pkg.manifestChecksum
+        ? { checksums: [{ algorithm: "SHA256", checksumValue: pkg.manifestChecksum }] }
+        : {}),
     })),
   };
 
@@ -182,7 +200,8 @@ export function generateSbom(rootDir: string = process.cwd()): SbomDocument {
 /**
  * Main entry point for CLI usage.
  */
-if (require.main === module) {
+const invokedPath = process.argv[1];
+if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
   const rootDir = process.argv[2] ?? process.cwd();
   const sbom = generateSbom(rootDir);
   console.log(JSON.stringify(sbom, null, 2));

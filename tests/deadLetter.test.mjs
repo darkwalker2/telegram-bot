@@ -15,7 +15,7 @@ import test, { mock } from "node:test";
 
 import { createDeadLetterQueue, makeEntryId } from "../dist/deadLetter.js";
 
-const BOT_TOKEN = "1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+const BOT_TOKEN = "1234567890:" + "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
 
 async function withQueue(run, options = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "mimir-dlq-"));

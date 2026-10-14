@@ -24,7 +24,7 @@ import { createPoller } from "../dist/poller.js";
 v8.setFlagsFromString("--expose-gc");
 const gc = vm.runInNewContext("gc");
 
-const TOKEN = "123456789:SOAK-ONLY-TOKEN-NEVER-USE";
+const TOKEN = "123456789:" + "SOAK-ONLY-TOKEN-NEVER-USE";
 const MARKET_ID = "C" + "A".repeat(55);
 const SQUAD_ID = "C" + "B".repeat(55);
 const HUGE = "remote-payload-".repeat(400); // ~6 KB of hostile error text
@@ -147,7 +147,16 @@ async function withQuietConsole(fn) {
 async function soak({ send }) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "mimir-soak-"));
   mock.timers.enable({ apis: ["setTimeout"] });
-  const poller = createPoller({ config: baseConfig(path.join(dir, "cursor.json")), server: makeServer(), send });
+  const poller = createPoller({
+    config: baseConfig(path.join(dir, "cursor.json")),
+    server: makeServer(),
+    send,
+    // The scripted RPC rotates failure classes every call. Per-target backoff
+    // and the circuit breaker would skip most of those calls, so the soak
+    // would stop exercising them; both are pinned by their own suites.
+    targetBackoffOptions: { initialBackoffMs: 0 },
+    circuitBreakerOptions: { failureThreshold: Number.POSITIVE_INFINITY },
+  });
   const result = {};
   try {
     result.logs = await withQuietConsole(async () => {

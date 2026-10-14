@@ -169,7 +169,8 @@ export function renderLogExport(
   now: number = Date.now(),
 ): string {
   const lines: string[] = [];
-  lines.push("Mimir notifier log export");
+  // The version is public build metadata (also on /health), not a secret.
+  lines.push(`Mimir notifier log export · v${config.version ?? "unknown"}`);
   // Network label is display-safe (testnet/public/custom) — not the RPC URL,
   // which could name a private endpoint.
   lines.push(`network: ${networkLabel(config)} · log lines kept: ${capture.capacity()}`);
@@ -213,3 +214,152 @@ export function renderLogExport(
   }
   return text;
 }
+
+// ── Structured logger ─────────────────────────────────────────────────────────
+//
+// `Logger` keeps the plain console lines operators already grep for (text, the
+// default) and can emit one JSON object per line instead (`LOG_FORMAT=json`).
+// Every line is redacted before it leaves the process: registered secrets and
+// anything shaped like a Telegram bot token are replaced, in the message and in
+// every field. Field values are bounded (depth, string length) so a remote
+// payload can never turn one log call into an unbounded record, and a field
+// that cannot be serialized degrades to the bare message instead of throwing.
+
+export type LogLevel = "debug" | "info" | "warn" | "error" | "fatal";
+export type LogFormat = "text" | "json";
+export type LogFields = Record<string, unknown>;
+export type LogSink = (level: LogLevel, line: string) => void;
+
+export const LOG_LEVEL_ENV = "LOG_LEVEL";
+export const LOG_FORMAT_ENV = "LOG_FORMAT";
+export const DEFAULT_LOG_LEVEL: LogLevel = "info";
+export const DEFAULT_LOG_FORMAT: LogFormat = "text";
+/** Longest string any single field may carry into a JSON record. */
+export const MAX_LOG_FIELD_CHARS = 1_000;
+
+const LOG_REDACTED = "[REDACTED]";
+const MAX_FIELD_DEPTH = 4;
+const LEVEL_RANK: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40, fatal: 50 };
+const TELEGRAM_TOKEN_SHAPE = /\b\d{5,}:[A-Za-z0-9_-]{20,}/g;
+
+export function parseLogLevel(value: unknown): LogLevel {
+  if (typeof value !== "string") return DEFAULT_LOG_LEVEL;
+  const normalized = value.trim().toLowerCase();
+  return normalized in LEVEL_RANK ? (normalized as LogLevel) : DEFAULT_LOG_LEVEL;
+}
+
+export function parseLogFormat(value: unknown): LogFormat {
+  if (typeof value !== "string") return DEFAULT_LOG_FORMAT;
+  return value.trim().toLowerCase() === "json" ? "json" : DEFAULT_LOG_FORMAT;
+}
+
+const consoleSink: LogSink = (level, line) => {
+  if (level === "error" || level === "fatal") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+};
+
+interface LoggerState {
+  level: LogLevel;
+  format: LogFormat;
+  sink: LogSink;
+  secrets: string[];
+  now: () => Date;
+}
+
+function defaultState(): LoggerState {
+  return {
+    level: DEFAULT_LOG_LEVEL,
+    format: DEFAULT_LOG_FORMAT,
+    sink: consoleSink,
+    secrets: [],
+    now: () => new Date(),
+  };
+}
+
+let state = defaultState();
+
+function redactLogText(text: string): string {
+  let out = text;
+  for (const secret of state.secrets) {
+    if (secret.length > 0) out = out.split(secret).join(LOG_REDACTED);
+  }
+  return out.replace(TELEGRAM_TOKEN_SHAPE, LOG_REDACTED);
+}
+
+function boundField(text: string): string {
+  return text.length <= MAX_LOG_FIELD_CHARS ? text : `${text.slice(0, MAX_LOG_FIELD_CHARS - 1)}…`;
+}
+
+function sanitize(value: unknown, depth: number): unknown {
+  if (typeof value === "string") return boundField(redactLogText(value));
+  if (typeof value === "bigint") return value.toString();
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= MAX_FIELD_DEPTH) return "[depth-limit]";
+  if (Array.isArray(value)) return value.map((item) => sanitize(item, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (item === undefined || typeof item === "function") continue;
+    out[key] = sanitize(item, depth + 1);
+  }
+  return out;
+}
+
+function emit(level: LogLevel, component: string, message: string, fields?: LogFields): void {
+  if (LEVEL_RANK[level] < LEVEL_RANK[state.level]) return;
+  const msg = redactLogText(message);
+  if (state.format === "text") {
+    state.sink(level, msg);
+    return;
+  }
+  let line: string;
+  try {
+    const safe: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(fields ?? {})) {
+      if (item === undefined || typeof item === "function") continue;
+      safe[key] = sanitize(item, 0);
+    }
+    line = JSON.stringify({ ...safe, ts: state.now().toISOString(), level, component, msg });
+  } catch {
+    // Never let a hostile field take the log call (or the caller) down.
+    line = msg;
+  }
+  state.sink(level, line);
+}
+
+export const Logger = {
+  configure(options: Partial<LoggerState>): void {
+    state = { ...state, ...options };
+  },
+  configureFromEnv(env: Record<string, string | undefined> = process.env): void {
+    state = {
+      ...state,
+      level: parseLogLevel(env[LOG_LEVEL_ENV]),
+      format: parseLogFormat(env[LOG_FORMAT_ENV]),
+    };
+  },
+  reset(): void {
+    state = defaultState();
+  },
+  getLevel(): LogLevel {
+    return state.level;
+  },
+  getFormat(): LogFormat {
+    return state.format;
+  },
+  debug(component: string, message: string, fields?: LogFields): void {
+    emit("debug", component, message, fields);
+  },
+  info(component: string, message: string, fields?: LogFields): void {
+    emit("info", component, message, fields);
+  },
+  warn(component: string, message: string, fields?: LogFields): void {
+    emit("warn", component, message, fields);
+  },
+  error(component: string, message: string, fields?: LogFields): void {
+    emit("error", component, message, fields);
+  },
+  fatal(component: string, message: string, fields?: LogFields): void {
+    emit("fatal", component, message, fields);
+  },
+};

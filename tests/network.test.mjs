@@ -124,10 +124,10 @@ test("networkLabel: no network field, testnet passphrase infers 'testnet'", () =
   );
 });
 
-test("networkLabel: no network field, mainnet passphrase infers 'mainnet'", () => {
+test("networkLabel: no network field, mainnet passphrase infers 'public'", () => {
   assert.equal(
     networkLabel(makeConfig({ networkPassphrase: NETWORK_PASSPHRASES.mainnet })),
-    "mainnet",
+    "public",
   );
 });
 

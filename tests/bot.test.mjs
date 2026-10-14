@@ -308,6 +308,7 @@ test("/preview command sends exact MarkdownV2 preview payload for market and squ
   let marketReplied = false;
   const ctxMarket = {
     message: { text: "/preview market" },
+    chat: { id: -1001234567890 },
     update: { update_id: 101 },
     reply: async (...args) => {
       marketReplied = true;
@@ -321,6 +322,7 @@ test("/preview command sends exact MarkdownV2 preview payload for market and squ
   let squadReplied = false;
   const ctxSquad = {
     message: { text: "/preview squad" },
+    chat: { id: -1001234567890 },
     update: { update_id: 102 },
     reply: async (...args) => {
       squadReplied = true;

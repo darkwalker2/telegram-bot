@@ -7,7 +7,10 @@
  * drain, one cursor flush, then exit.
  */
 
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+
+import { webhookCallback } from "grammy";
 
 import {
   ConfigError,
@@ -20,13 +23,13 @@ import {
 import { formatFeatureFlags } from "./notifications/featureFlags.js";
 import { auditEntry, createAuditLog } from "./audit.js";
 import { InstanceLockError } from "./instanceLock.js";
-import { Logger } from "./logger.js";
+import { attachConsole, createLogCapture, Logger, secretsFor } from "./logger.js";
 import { createBot, createNotifier, registerCommands, type SendExtra } from "./bot.js";
 import { startHealthServer } from "./health.js";
 import { createPoller, waitForStartupHealth } from "./poller.js";
 import type { ContractSource } from "./stellar/decode.js";
 import { safeErrorMessage } from "./notifications/format.js";
-import { createRpcServer } from "./stellar/client.js";
+import { createRpcServer, validateNetworkPassphrase } from "./stellar/client.js";
 import { createMetrics } from "./metrics.js";
 import type { MetricsServer } from "./metrics.js";
 import { boundText } from "./status.js";
@@ -95,6 +98,7 @@ async function printStatus(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  Logger.configureFromEnv();
   installProcessHandlers();
 
   if (process.argv.includes("--status")) {
@@ -108,6 +112,13 @@ async function main(): Promise<void> {
   // operator-facing error goes through the scrubber, so a call site cannot
   // leak the token or the chat id by forgetting to pass them.
   registerSecrets([config.botToken, config.chatId]);
+  Logger.configure({ secrets: [config.botToken] });
+
+  // Log capture installs before the first [boot] line so /export always
+  // includes startup context. Capacity 0 keeps capture off entirely.
+  const logCapture = createLogCapture(config.logBufferLines);
+  const restoreConsole = attachConsole(logCapture, secretsFor(config));
+  process.once("exit", restoreConsole);
 
   // The mock profile exists for the dry-run entry, not this one: warn loudly
   // so a profile left set in a deployment is noticed before Telegram rejects
@@ -126,7 +137,8 @@ async function main(): Promise<void> {
   console.log(`[boot] network      ${networkLabel(config)} (${redactUrl(config.rpcUrl)})`);
   console.log(`[boot] market       ${config.marketContractId}`);
   console.log(`[boot] squad        ${config.squadContractId}`);
-  console.log(`[boot] chat         ${config.chatId}`);
+  // The chat id is a registered secret: say that it is set, never what it is.
+  console.log(`[boot] chat         configured (value redacted)`);
   console.log(
     `[boot] allowlist    ${
       config.allowedChatIds.length === 0
@@ -139,9 +151,17 @@ async function main(): Promise<void> {
   console.log(`[boot] audit file   ${config.auditFile}`);
   console.log(`[boot] lock file    ${config.lockFile}`);
   console.log(`[boot] shutdown     ${config.shutdownTimeoutMs}ms drain budget`);
-  console.log(
+  Logger.info(
+    "boot",
     `[boot] operator      ${config.operatorTelegramUserId === null ? "disabled" : "configured"}`,
     { operatorConfigured: config.operatorTelegramUserId !== null },
+  );
+  console.log(
+    `[boot] claim filter  ${
+      config.notificationCategories.length === 0
+        ? "all categories"
+        : config.notificationCategories.join(", ")
+    }`,
   );
   Logger.info(
     "boot",
@@ -182,7 +202,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const server = await createRpcServer(config);
+  const server = createRpcServer(config);
 
   // Bounded retries before announcing readiness: a briefly unavailable RPC
   // (deploy race, Testnet blip) should not fail the whole boot, but a wrong
@@ -225,8 +245,6 @@ async function main(): Promise<void> {
     throw new Error("telegram notifier not ready");
   };
 
-  const poller = createPoller({ config, server, send: (text) => notify(text), metrics });
-  const bot = createBot({ config, status: () => poller.status() });
   const audit = createAuditLog();
   audit.record(
     auditEntry("boot", {
@@ -238,6 +256,7 @@ async function main(): Promise<void> {
     server,
     send: (text, source, extra) => notify(text, source, extra),
     audit,
+    metrics,
   });
   const bot = createBot({
     config,
@@ -245,15 +264,24 @@ async function main(): Promise<void> {
     audit,
     pause: () => poller.pause(),
     resume: () => poller.resume(),
+    logs: logCapture,
   });
-  notify = createNotifier(bot);
+  notify = createNotifier(bot, config);
+
+  // Webhook mode only accepts updates carrying this per-process secret, so a
+  // reachable health port cannot be used to inject fake Telegram updates.
+  const webhookSecret = config.telegramWebhookUrl ? randomBytes(32).toString("hex") : null;
 
   // Local-only health HTTP for supervisors. Starts before Telegram long-poll
   // so a deploy probe can see the process even while grammy is connecting.
   const healthServer = startHealthServer({
     config,
     status: () => poller.status(),
-    webhookHandler: config.telegramWebhookUrl ? webhookCallback(bot, "http") : undefined,
+    logs: logCapture,
+    webhookHandler:
+      webhookSecret !== null
+        ? webhookCallback(bot, "http", { secretToken: webhookSecret })
+        : undefined,
   });
 
   await registerCommands(bot, config);
@@ -262,26 +290,35 @@ async function main(): Promise<void> {
   // That keeps a duplicate process from racing the cursor or fighting getUpdates.
   await poller.start();
 
-  // grammy's `start` resolves only when the bot stops, so it is not awaited.
-  // It retries transient network trouble internally; a rejection here means the
-  // token itself cannot authenticate, which no amount of waiting fixes.
-  void bot
-    .start({
-      onStart: (me) =>
-        Logger.info("boot", `[boot] telegram ok, running as @${me.username}`, {
-          telegramOk: true,
-          username: me.username,
-        }),
-    })
-    .catch((err: unknown) => {
-      Logger.fatal(
-        "boot",
-        `[fatal] telegram long-polling failed — check BOT_TOKEN: ` +
-          safeErrorMessage(err, [config.botToken]),
-        { action: "telegram_start_failed" },
-      );
-      void poller.stop().finally(() => process.exit(1));
+  if (config.telegramWebhookUrl && webhookSecret !== null) {
+    const webhookUrl = new URL("/telegram-webhook", config.telegramWebhookUrl).toString();
+    await bot.api.setWebhook(webhookUrl, { secret_token: webhookSecret });
+    Logger.info("boot", `[boot] telegram ok, listening for webhooks at ${redactUrl(webhookUrl)}`, {
+      telegramOk: true,
+      mode: "webhook",
     });
+  } else {
+    // grammy's `start` resolves only when the bot stops, so it is not awaited.
+    // It retries transient network trouble internally; a rejection here means the
+    // token itself cannot authenticate, which no amount of waiting fixes.
+    void bot
+      .start({
+        onStart: (me) =>
+          Logger.info("boot", `[boot] telegram ok, running as @${me.username}`, {
+            telegramOk: true,
+            username: me.username,
+          }),
+      })
+      .catch((err: unknown) => {
+        Logger.fatal(
+          "boot",
+          `[fatal] telegram long-polling failed — check BOT_TOKEN: ` +
+            safeErrorMessage(err, [config.botToken]),
+          { action: "telegram_start_failed" },
+        );
+        void poller.stop().finally(() => process.exit(1));
+      });
+  }
 
   let shuttingDown = false;
 
@@ -295,11 +332,6 @@ async function main(): Promise<void> {
    * cold-ish resume bounded by the last completed cycle.
    */
   const shutdown = (signal: string) => {
-    console.log(`[shutdown] ${signal} received, stopping`);
-    poller.stop();
-    const stopBot = bot.stop().finally(() => process.exit(0));
-    const stopMetrics = metricsServer ? metricsServer.close() : Promise.resolve();
-    void Promise.all([stopBot, stopMetrics]);
     if (shuttingDown) {
       Logger.warn("shutdown", `[shutdown] ${signal} received again during drain; forcing exit`, {
         signal,
@@ -368,6 +400,18 @@ async function main(): Promise<void> {
           `[shutdown] telegram stop failed: ${safeErrorMessage(err, [config.botToken])}`,
           { action: "telegram_stop_failed" },
         );
+      }
+
+      if (metricsServer) {
+        try {
+          await metricsServer.close();
+        } catch (err: unknown) {
+          Logger.error(
+            "shutdown",
+            `[shutdown] metrics server close failed: ${safeErrorMessage(err)}`,
+            { action: "metrics_close_failed" },
+          );
+        }
       }
 
       // Flush last so entries recorded while stopping are persisted.
