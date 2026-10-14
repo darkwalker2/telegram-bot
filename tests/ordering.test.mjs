@@ -410,6 +410,8 @@ test("decoded metadata carries only bounded fields (no raw RPC payloads)", () =>
     "transactionIndex",
     "operationIndex",
     "inSuccessfulContractCall",
+    // Normalized contract version the decoder was selected by (bounded string).
+    "version",
     "payload",
   ]);
   for (const key of Object.keys(decoded)) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createBot, registerCommands } from "../dist/bot.js";
+import { createBot, healthMessage, registerCommands } from "../dist/bot.js";
 import { buildHealthReport, startHealthServer } from "../dist/health.js";
 
 function baseConfig(overrides = {}) {

@@ -7,8 +7,12 @@ test('client explorer links use correct network segment', () => {
   const config = { explorerBaseUrl: 'https://stellar.expert/explorer', rpcUrl: 'https://soroban-testnet.stellar.org', networkPassphrase: 'Test SDF Network ; September 2015' };
   assert.equal(explorerNetworkSegment(config), 'testnet');
   assert.equal(txExplorerUrl(config, '123'), 'https://stellar.expert/explorer/testnet/tx/123');
-  assert.equal(accountExplorerUrl(config, 'G123'), 'https://stellar.expert/explorer/testnet/account/G123');
-  assert.equal(contractExplorerUrl(config, 'C123'), 'https://stellar.expert/explorer/testnet/contract/C123');
+  // Account and contract links only accept full strkeys.
+  const account = 'G' + 'A'.repeat(55);
+  const contract = 'C' + 'A'.repeat(55);
+  assert.equal(accountExplorerUrl(config, account), `https://stellar.expert/explorer/testnet/account/${account}`);
+  assert.equal(contractExplorerUrl(config, contract), `https://stellar.expert/explorer/testnet/contract/${contract}`);
+  assert.equal(accountExplorerUrl(config, 'G123'), '');
 });
 
 test('client explorer links default to testnet for unknown networks', () => {

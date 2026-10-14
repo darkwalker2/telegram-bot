@@ -12,6 +12,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { configProvenance, networkLabel, type BotConfig, type ConfigProvenance } from "./config.js";
+import type { LogCapture } from "./logger.js";
 import { safeErrorMessage } from "./notifications/format.js";
 import type { PollerStatus } from "./poller.js";
 import { redactText } from "./redact.js";
@@ -23,6 +24,8 @@ export interface HealthDeps {
   logs?: LogCapture;
   /** Optional clock for deterministic tests. */
   now?: () => number;
+  /** Optional handler for Telegram webhook mode (POST /telegram-webhook). */
+  webhookHandler?: ((req: http.IncomingMessage, res: http.ServerResponse) => void) | undefined;
   /**
    * Optional provenance reader for deterministic tests. Defaults to
    * {@link configProvenance}; either way only key names and origins are served.
@@ -296,6 +299,9 @@ export function buildHealthReport(
         contractId: t.contractId,
         lastEventLedger: t.lastEventLedger,
         cursorPreview: previewCursor(t.cursor),
+        gapLedgers: typeof t.gapLedgers === "number" ? t.gapLedgers : 0,
+        cursorResetAt: iso(t.cursorResetAt ?? null),
+        cursorUnreadable: t.cursorUnreadable === true,
         rewindFromLedger: typeof t.rewindFromLedger === "number" ? t.rewindFromLedger : null,
         cursorStale: t.cursorStale === true,
         cursorStalled: t.cursorStalled === true,

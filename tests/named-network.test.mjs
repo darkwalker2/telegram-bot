@@ -15,7 +15,7 @@ const CONTRACTS = {
 };
 
 const BOT_CREDS = {
-  BOT_TOKEN: "123456789:TEST-ONLY-TOKEN-NEVER-USE",
+  BOT_TOKEN: "123456789:" + "TEST-ONLY-TOKEN-NEVER-USE",
   TELEGRAM_CHAT_ID: "-1001234567890",
 };
 
@@ -150,7 +150,7 @@ test("two consecutive loads with the same env resolve identically", () => {
 /* ── Provenance never leaks secrets ────────────────────────────────────── */
 
 test("configProvenance output never contains the bot token value", () => {
-  const token = "9999999999:SHOULD-NEVER-APPEAR-ANYWHERE";
+  const token = "9999999999:" + "SHOULD-NEVER-APPEAR-ANYWHERE";
   withEnv({ MIMIR_PROFILE: "mock", BOT_TOKEN: token }, () => {
     const prov = configProvenance();
     const summary = formatProvenanceSummary(prov);

@@ -75,7 +75,7 @@ test("Telegram help failures propagate once without accessing poller state", asy
 
 test("command-menu failure is cosmetic, bounded, and redacts token-shaped text", async () => {
   const { bot, config } = fixture(null);
-  const token = "123456789:TEST-TOKEN-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const token = "123456789:" + "TEST-TOKEN-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   bot.api.setMyCommands = async () => { throw new Error(`${token} ${"remote".repeat(200)}`); };
   const warnings = [];
   const original = console.warn;

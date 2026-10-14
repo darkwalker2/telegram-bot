@@ -200,11 +200,10 @@ function who(address: string): string {
  *
  * The category, question, and summary fields all come from remote contract
  * state. A hard cap here means a crafted payload cannot push an unbounded
- * string through to a Telegram message or to a log line.
+ * string through to a Telegram message or to a log line. Never splits a
+ * Unicode code point.
  */
-export function clip(text: string, max = 200): string {
-/** Truncate an unbounded contract String without splitting a Unicode code point. */
-function clip(text: string, max = MAX_EVENT_FIELD_LENGTH): string {
+export function clip(text: string, max = MAX_EVENT_FIELD_LENGTH): string {
   const trimmed = text.trim();
   const characters = Array.from(trimmed);
   return characters.length <= max ? trimmed : `${characters.slice(0, max - 1).join("")}…`;
@@ -282,16 +281,17 @@ export function formatLastEvent(config: StellarConfig, event: DecodedEvent): str
   );
 }
 
-/** Format the latest observed event, including events with no notification template. */
-export function formatLastEvent(config: StellarConfig, event: DecodedEvent): string {
-  const notification = formatEvent(config, event);
-  if (notification !== null) return notification;
-
-  const name = event.payload.name === "unknown" ? event.payload.eventName : event.payload.name;
-  return (
-    `*Last observed event* — \`${escapeMd(clip(name, 120))}\`\n` +
-    `This event has no notification summary\.\n${footer(config, event)}`
-  );
+/**
+ * One MarkdownV2 message summarising a burst of events: a header with the count
+ * and one bounded line per event. Returns null when there is nothing to send.
+ */
+export function formatDigest(events: readonly DecodedEvent[]): string | null {
+  if (events.length === 0) return null;
+  const lines = events.map((event) => {
+    const name = event.payload.name === "unknown" ? event.payload.eventName : event.payload.name;
+    return `· mimir\\-${escapeMd(event.source)} \`${escapeMd(clip(name, 80))}\` at ledger ${event.ledger}`;
+  });
+  return [`*Mimir Digest* — ${events.length} events in this cycle`, "", ...lines].join("\n");
 }
 
 /**
@@ -425,10 +425,28 @@ function headline(event: DecodedEvent): string | null {
 }
 
 /** The full message, or null when the event is not worth notifying. */
+/**
+ * True unless NOTIFY_CATEGORIES is set and this is a `claim_created` event whose
+ * category is not on the allowlist. Every other notification type always passes.
+ */
+export function eventAllowedByCategory(
+  config: { notificationCategories?: readonly string[] },
+  event: DecodedEvent,
+): boolean {
+  const categories = config.notificationCategories ?? [];
+  if (categories.length === 0 || event.payload.name !== "claim_created") return true;
+  const allowed = new Set(categories.map((category) => category.trim().toLowerCase()));
+  return allowed.has(String(event.payload.category ?? "").trim().toLowerCase());
+}
+
 export function formatEvent(
-  config: StellarConfig & { channelPreviewMode?: boolean },
+  config: StellarConfig & {
+    channelPreviewMode?: boolean;
+    notificationCategories?: readonly string[];
+  },
   event: DecodedEvent,
 ): string | null {
+  if (!eventAllowedByCategory(config, event)) return null;
   try {
     const head = headline(event);
     if (head === null) return null;
@@ -660,6 +678,7 @@ export function previewMessage(config: StellarConfig & { linkPreviewMarket?: boo
     const sampleEvent: DecodedEvent = {
       source: "squad",
       contractId: config.squadContractId,
+      version: "v1",
       ledger: 1000000,
       txHash: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
       at: Math.floor(Date.now() / 1000),
@@ -684,6 +703,7 @@ export function previewMessage(config: StellarConfig & { linkPreviewMarket?: boo
   const sampleEvent: DecodedEvent = {
     source: "market",
     contractId: config.marketContractId,
+    version: "v1",
     ledger: 1000000,
     txHash: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
     at: Math.floor(Date.now() / 1000),

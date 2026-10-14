@@ -150,6 +150,15 @@ function failingServer() {
   };
 }
 
+/**
+ * Per-target backoff and the circuit breaker both skip scans after failures;
+ * these tests count one failed scan per target per cycle, so turn both off.
+ */
+const EVERY_CYCLE_SCANS = {
+  targetBackoffOptions: { initialBackoffMs: 0 },
+  circuitBreakerOptions: { failureThreshold: Number.POSITIVE_INFINITY },
+};
+
 async function waitForCycles(poller, target) {
   for (let attempt = 0; attempt < 4_000; attempt += 1) {
     if (poller.status().cycles >= target) return;
@@ -164,6 +173,7 @@ test("poller samples repetitive RPC scan failures instead of logging every cycle
     config: baseConfig({ cursorFile: path.join(directory, "cursor.json") }),
     server: failingServer(),
     send: async () => undefined,
+    ...EVERY_CYCLE_SCANS,
   });
   const originalError = console.error;
   const logs = [];
@@ -172,6 +182,8 @@ test("poller samples repetitive RPC scan failures instead of logging every cycle
   try {
     await poller.start();
     await waitForCycles(poller, 8);
+    // Let the in-flight cycle finish so `cycles` matches the logged scans.
+    await poller.shutdown({ timeoutMs: 1_000 });
 
     const status = poller.status();
     assert.ok(status.cycles >= 8);
@@ -200,6 +212,7 @@ test("maxPerWindow=1 keeps a single line per failing key", async () => {
     }),
     server: failingServer(),
     send: async () => undefined,
+    ...EVERY_CYCLE_SCANS,
   });
   const originalError = console.error;
   const logs = [];
@@ -208,6 +221,8 @@ test("maxPerWindow=1 keeps a single line per failing key", async () => {
   try {
     await poller.start();
     await waitForCycles(poller, 4);
+    // Let the in-flight cycle finish so `cycles` matches the logged scans.
+    await poller.shutdown({ timeoutMs: 1_000 });
 
     const status = poller.status();
     const marketLines = logs.filter((line) => line.includes("market scan failed"));

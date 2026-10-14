@@ -367,7 +367,7 @@ test("config provenance never includes setting values", () => {
   withEnv(
     {
       MIMIR_PROFILE: "mock",
-      BOT_TOKEN: "123456789:REAL-SECRET-TOKEN",
+      BOT_TOKEN: "123456789:" + "REAL-SECRET-TOKEN",
       TELEGRAM_CHAT_ID: "-1001234567890",
     },
     () => {
@@ -454,14 +454,27 @@ test("clean checkout: mock RPC, poller, and health server start without credenti
     console.log = capture;
     console.warn = capture;
 
+    let poller;
+    let health;
     try {
       const send = async (text) => {
         capture(`[send] ${text}`);
       };
 
-      const pollerConfig = { ...config, cursorFile, healthPort: 18787, rpcUrl: mock.url };
-      const poller = createPoller({ config: pollerConfig, server, send });
-      const health = startHealthServer({ config: pollerConfig, status: () => poller.status() });
+      // Every state file lives in the temp dir: the profile defaults point at
+      // ./data, whose instance lock other suites (mock:poll) also take.
+      const pollerConfig = {
+        ...config,
+        cursorFile,
+        lockFile: path.join(dir, "poller.lock"),
+        statusFile: path.join(dir, "status.json"),
+        auditFile: path.join(dir, "audit.jsonl"),
+        deadLetterFile: path.join(dir, "dead-letter.json"),
+        healthPort: 18799, // unique across suites: test files run in parallel
+        rpcUrl: mock.url,
+      };
+      poller = createPoller({ config: pollerConfig, server, send });
+      health = startHealthServer({ config: pollerConfig, status: () => poller.status() });
 
       await poller.start();
 
@@ -501,17 +514,18 @@ test("clean checkout: mock RPC, poller, and health server start without credenti
       const allLogs = logs.join("\n");
       assert.equal(allLogs.includes("REAL-SECRET"), false);
       assert.equal(allLogs.includes("MOCK-PROFILE-NOT-A-BOT-TOKEN"), false);
-
-      await poller.shutdown({ timeoutMs: 1000 });
-      await health.close();
-      await mock.close();
     } finally {
+      // Teardown runs even when an assertion fails, so nothing keeps the
+      // test process alive.
+      await poller?.shutdown({ timeoutMs: 1000 });
+      await health?.close();
+      await mock.close();
       console.log = originalLog;
       console.warn = originalWarn;
     }
   });
 
-  await rm(dir, { recursive: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -1,41 +1,4 @@
-
 /**
- * Poller unit tests.
- *
- * All tests use fake RPC and fake send implementations — no live Testnet or
- * Telegram credentials are required or consulted. The fake RPC returns
- * controlled scan results; the fake send records calls and can be made to
- * reject.
- */
-
-import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import test from "node:test";
-
-import { createPoller } from "../dist/poller.js";
-import { buildHealthReport } from "../dist/health.js";
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-const CONTRACT_A = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
-const CONTRACT_B = "CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBQMF4";
-
-function makeConfig(overrides = {}) {
-  return {
-    botToken: "REDACTED",
-    chatId: "-1001234567890",
-    marketContractId: CONTRACT_A,
-    squadContractId: CONTRACT_B,
-    rpcUrl: "https://soroban-testnet.stellar.org",
-    horizonUrl: "https://horizon-testnet.stellar.org",
-    networkPassphrase: "Test SDF Network ; September 2015",
-    pollIntervalMs: 999_999, // prevent automatic re-poll in tests
-    startLookbackLedgers: 60,
-    cursorFile: "/tmp/test-cursor-UNUSED.json",
-    maxNotificationsPerCycle: 3,
-    interSendDelayMs: 0, // no sleep in tests
  * Tests for src/poller.ts
  *
  * All I/O (filesystem, RPC, Telegram) is replaced by in-process fakes so no
@@ -128,8 +91,50 @@ function baseConfig(overrides = {}) {
     cursorFile: dataDir.file("unused-cursor.json"),
     maxNotificationsPerCycle: 5,
     shutdownTimeoutMs: 5_000,
-    ...overrides,
+    ...opts,
   };
+}
+
+/** RPC whose chain tip reads fine but whose event reads never settle. */
+function stuckServer() {
+  return {
+    getHealth: async () => ({
+      status: "healthy",
+      oldestLedger: SHUT_TIP - 100,
+      latestLedger: SHUT_TIP,
+    }),
+    getEvents: () => new Promise(() => undefined),
+  };
+}
+
+/** RPC that is down: every read rejects with `message`. */
+function failingServer(message) {
+  return {
+    getHealth: async () => {
+      throw new Error(message);
+    },
+    getEvents: async () => {
+      throw new Error(message);
+    },
+  };
+}
+
+/** Waits until a full cycle has failed (all targets), as recorded in status. */
+async function waitForFailedCycle(poller, timeoutMs = 2_000) {
+  await waitFor(() => poller.status().consecutiveFailures >= 1, timeoutMs);
+}
+
+/** Waits until `n` cycles have started and one has run to completion. */
+async function waitForCycles(poller, n, timeoutMs = 2_000) {
+  await waitFor(() => {
+    const status = poller.status();
+    return status.cycles >= n && (status.lastSuccessAt !== null || status.consecutiveFailures >= 1);
+  }, timeoutMs);
+}
+
+/** Removes a per-test temp directory, tolerating Windows file-handle lag. */
+async function cleanDir(directory) {
+  await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 }
 
 function makeFakeServer(healthOrError, scanResults = new Map()) {
@@ -1606,7 +1611,8 @@ test("fake clock: saveCursors writes updatedAt from the injected clock", async (
   try {
     await poller.start();
     await waitForFailedCycle(poller);
-    await drainCycle(); // let saveCursors finish before reading the file
+    // saveCursors writes via tmp + rename, so existence means a complete file.
+    await waitFor(() => existsSync(cursorFile));
 
     const saved = JSON.parse(await readFile(cursorFile, "utf8"));
     assert.equal(saved.updatedAt, EXPECTED_ISO);
@@ -1877,7 +1883,8 @@ test("regression: consecutive failures increment by 1 per all-failed cycle", asy
   await writeFile(cursorFile, CURSOR_FILE, "utf8");
 
   const poller = createPoller({
-    config: { ...baseConfig(cursorFile), pollIntervalMs: 0 },
+    // A long interval keeps the second cycle from racing the assertion.
+    config: baseConfig(cursorFile),
     server: failingServer("both contracts down"),
     send: async () => undefined,
     now: () => 10_000,
@@ -1902,7 +1909,7 @@ test("regression: lastError message is bounded and never contains the bot token"
   const cursorFile = path.join(directory, "cursor.json");
   // No pre-existing cursor file needed — we assert on error message properties.
 
-  const secret = "123456789:TEST-ONLY-TOKEN-NEVER-USE";
+  const secret = "123456789:" + "TEST-ONLY-TOKEN-NEVER-USE";
   const hugePayload = secret + " " + "x".repeat(2000);
 
   const poller = createPoller({

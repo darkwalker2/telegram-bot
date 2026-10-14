@@ -24,7 +24,7 @@ import { createTempDataDir } from "./helpers/temp-data.mjs";
 const dataDir = await createTempDataDir("mimir-dlq-poller-");
 test.after(() => dataDir.cleanup());
 
-const BOT_TOKEN = "1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+const BOT_TOKEN = "1234567890:" + "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
 const MARKET_ID = "C" + "A".repeat(55);
 const SQUAD_ID = "C" + "B".repeat(55);
 

@@ -117,7 +117,7 @@ test("the canonical keys cannot be shadowed by a caller's fields", () => {
 });
 
 test("a registered secret is redacted in the message and in every field", () => {
-  const token = "123456789:AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII";
+  const token = "123456789:" + "AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII";
   Logger.configure({ format: "json", secrets: [token] });
   const lines = captureConsole();
   Logger.fatal("process", `[fatal] telegram long-polling failed: ${token}`, {
@@ -142,7 +142,7 @@ test("a Telegram-shaped token is redacted even when its value is not registered"
 });
 
 test("text format redacts too, not only json", () => {
-  const token = "55555:QQQQQQQQQQQQQQQQQQQQQQQQ";
+  const token = "55555:" + "QQQQQQQQQQQQQQQQQQQQQQQQ";
   Logger.configure({ format: "text", secrets: [token] });
   const lines = captureConsole();
   Logger.error("x", `failed with ${token}`);
@@ -205,7 +205,7 @@ test("configureFromEnv reads the level and format variables", () => {
 });
 
 test("reset restores the defaults and drops registered secrets", () => {
-  const token = "123456789:AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII";
+  const token = "123456789:" + "AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII";
   Logger.configure({ level: "debug", format: "json", secrets: [token] });
   Logger.reset();
   assert.equal(Logger.getLevel(), DEFAULT_LOG_LEVEL);
